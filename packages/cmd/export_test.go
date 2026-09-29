@@ -153,3 +153,51 @@ func TestPosixShellQuote(t *testing.T) {
 		})
 	}
 }
+
+func TestQuoteDotEnvValue(t *testing.T) {
+	tests := []struct {
+		name       string
+		value      string
+		quoteStyle string
+		expected   string
+	}{
+		{name: "single simple", value: "hello", quoteStyle: QuoteSingle, expected: "'hello'"},
+		{name: "double simple", value: "hello", quoteStyle: QuoteDouble, expected: `"hello"`},
+		{name: "none simple", value: "hello", quoteStyle: QuoteNone, expected: "hello"},
+		{name: "double with quotes", value: `say "hi"`, quoteStyle: QuoteDouble, expected: `"say \"hi\""`},
+		{name: "double with backslash", value: `a\b`, quoteStyle: QuoteDouble, expected: `"a\\b"`},
+		{name: "none with spaces", value: "a b", quoteStyle: QuoteNone, expected: "a b"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, quoteDotEnvValue(tt.value, tt.quoteStyle))
+		})
+	}
+}
+
+func TestFormatAsDotEnvQuoteStyles(t *testing.T) {
+	input := []models.SingleEnvironmentVariable{
+		{Key: "KEY1", Value: "simple"},
+		{Key: "KEY2", Value: `has "quotes"`},
+	}
+
+	assert.Equal(t, "KEY1='simple'\nKEY2='has \"quotes\"'\n", formatAsDotEnv(input, QuoteSingle))
+	assert.Equal(t, "KEY1=\"simple\"\nKEY2=\"has \\\"quotes\\\"\"\n", formatAsDotEnv(input, QuoteDouble))
+	assert.Equal(t, "KEY1=simple\nKEY2=has \"quotes\"\n", formatAsDotEnv(input, QuoteNone))
+}
+
+func TestFormatAsDotEnvExportQuoteStyles(t *testing.T) {
+	input := []models.SingleEnvironmentVariable{
+		{Key: "KEY1", Value: "simple"},
+	}
+
+	assert.Equal(t, "export KEY1='simple'\n", formatAsDotEnvExport(input, QuoteSingle))
+	assert.Equal(t, "export KEY1=\"simple\"\n", formatAsDotEnvExport(input, QuoteDouble))
+	assert.Equal(t, "export KEY1=simple\n", formatAsDotEnvExport(input, QuoteNone))
+}
+
+func TestFormatEnvsInvalidQuote(t *testing.T) {
+	_, err := formatEnvs(nil, FormatDotenv, "invalid")
+	assert.Error(t, err)
+}
