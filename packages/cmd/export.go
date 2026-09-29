@@ -25,6 +25,10 @@ const (
 	FormatYaml         string = "yaml"
 	FormatDotEnvExport string = "dotenv-export"
 	FormatDotEnvEval   string = "dotenv-eval"
+
+	QuoteSingle string = "single"
+	QuoteDouble string = "double"
+	QuoteNone   string = "none"
 )
 
 // exportCmd represents the export command
@@ -64,6 +68,11 @@ var exportCmd = &cobra.Command{
 		}
 
 		format, err := cmd.Flags().GetString("format")
+		if err != nil {
+			util.HandleError(err)
+		}
+
+		quoteStyle, err := cmd.Flags().GetString("quote")
 		if err != nil {
 			util.HandleError(err)
 		}
@@ -142,7 +151,7 @@ var exportCmd = &cobra.Command{
 		secrets = util.FilterSecretsByTag(secrets, tagSlugs)
 		secrets = util.SortSecretsByKeys(secrets)
 
-		output, err = formatEnvs(secrets, format)
+		output, err = formatEnvs(secrets, format, quoteStyle)
 		if err != nil {
 			util.HandleError(err)
 		}
@@ -267,6 +276,7 @@ func init() {
 	exportCmd.Flags().StringP("env", "e", "dev", "Set the environment (dev, prod, etc.) from which your secrets should be pulled from")
 	exportCmd.Flags().Bool("expand", true, "Parse shell parameter expansions in your secrets")
 	exportCmd.Flags().StringP("format", "f", "dotenv", "Set the format of the output file (dotenv, dotenv-export, dotenv-eval, json, csv, yaml)")
+	exportCmd.Flags().String("quote", QuoteSingle, "Quote style for dotenv and dotenv-export formats (single, double, none). Default single keeps existing behavior. Use double for multiline values (e.g. PEM keys); none for Docker --env-file")
 	exportCmd.Flags().Bool("secret-overriding", true, "Prioritizes personal secrets, if any, with the same name over shared secrets")
 	exportCmd.Flags().Bool("include-imports", true, "Imported linked secrets")
 	exportCmd.Flags().String("token", "", "Fetch secrets using service token or machine identity access token")
@@ -278,13 +288,22 @@ func init() {
 }
 
 // Format according to the format flag
-func formatEnvs(envs []models.SingleEnvironmentVariable, format string) (string, error) {
+func formatEnvs(envs []models.SingleEnvironmentVariable, format string, quoteStyle string) (string, error) {
+	quoteStyle = strings.ToLower(quoteStyle)
+	switch quoteStyle {
+	case QuoteSingle, QuoteDouble, QuoteNone:
+		// valid
+	default:
+		return "", fmt.Errorf("invalid quote style: %s. Available quote styles are [%s, %s, %s]", quoteStyle, QuoteSingle, QuoteDouble, QuoteNone)
+	}
+
 	switch strings.ToLower(format) {
 	case FormatDotenv:
-		return formatAsDotEnv(envs), nil
+		return formatAsDotEnv(envs, quoteStyle), nil
 	case FormatDotEnvExport:
-		return formatAsDotEnvExport(envs), nil
+		return formatAsDotEnvExport(envs, quoteStyle), nil
 	case FormatDotEnvEval:
+		// dotenv-eval relies on POSIX single-quote semantics; --quote is ignored
 		return formatAsDotEnvEval(envs), nil
 	case FormatJson:
 		return formatAsJson(envs), nil
@@ -309,20 +328,36 @@ func formatAsCSV(envs []models.SingleEnvironmentVariable) string {
 	return csvString.String()
 }
 
+// quoteDotEnvValue wraps a dotenv value according to quoteStyle.
+// double escapes embedded double quotes and backslashes; single leaves value as-is
+// (matching historical behavior); none emits the raw value.
+func quoteDotEnvValue(value string, quoteStyle string) string {
+	switch quoteStyle {
+	case QuoteDouble:
+		escaped := strings.ReplaceAll(value, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		return `"` + escaped + `"`
+	case QuoteNone:
+		return value
+	default: // QuoteSingle
+		return "'" + value + "'"
+	}
+}
+
 // Format environment variables as a dotenv file
-func formatAsDotEnv(envs []models.SingleEnvironmentVariable) string {
+func formatAsDotEnv(envs []models.SingleEnvironmentVariable, quoteStyle string) string {
 	var dotenv string
 	for _, env := range envs {
-		dotenv += fmt.Sprintf("%s='%s'\n", env.Key, escapeNewLinesIfRequired(env))
+		dotenv += fmt.Sprintf("%s=%s\n", env.Key, quoteDotEnvValue(escapeNewLinesIfRequired(env), quoteStyle))
 	}
 	return dotenv
 }
 
 // Format environment variables as a dotenv file with export at the beginning
-func formatAsDotEnvExport(envs []models.SingleEnvironmentVariable) string {
+func formatAsDotEnvExport(envs []models.SingleEnvironmentVariable, quoteStyle string) string {
 	var dotenv string
 	for _, env := range envs {
-		dotenv += fmt.Sprintf("export %s='%s'\n", env.Key, escapeNewLinesIfRequired(env))
+		dotenv += fmt.Sprintf("export %s=%s\n", env.Key, quoteDotEnvValue(escapeNewLinesIfRequired(env), quoteStyle))
 	}
 	return dotenv
 }
@@ -340,7 +375,7 @@ func formatAsDotEnvEval(envs []models.SingleEnvironmentVariable) string {
 }
 
 // posixShellQuote wraps a value in single quotes and escapes any embedded
-// single quotes using the standard `'\”` sequence. Single-quoted POSIX
+// single quotes using the standard `'\''` sequence. Single-quoted POSIX
 // strings preserve every other character verbatim (including newlines,
 // backslashes, $, and "), so this is sufficient for eval/source.
 func posixShellQuote(value string) string {
